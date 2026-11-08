@@ -35,6 +35,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
@@ -83,6 +84,9 @@ private fun AquaScreen(player: MediaController?) {
     var page by remember { mutableStateOf("home") }
     var theme by remember { mutableStateOf(AquaTheme.AQUA) }
     var transparency by remember { mutableFloatStateOf(78f) }
+    var playPosition by remember { mutableFloatStateOf(0f) }
+    var durationMs by remember { mutableLongStateOf(0L) }
+    var draggingSeek by remember { mutableStateOf(false) }
     var pressed by remember { mutableStateOf(false) }
     val pulse by animateFloatAsState(if (pressed) .93f else 1f, label = "glassTap")
 
@@ -135,14 +139,22 @@ private fun AquaScreen(player: MediaController?) {
     }
 
     val current = tracks.getOrNull(selected)
+    LaunchedEffect(player, playing, selected) {
+        while (true) {
+            if (!draggingSeek) playPosition = (player?.currentPosition ?: 0L).coerceAtLeast(0L).toFloat()
+            durationMs = (player?.duration ?: 0L).takeIf { it > 0L && it != androidx.media3.common.C.TIME_UNSET } ?: 0L
+            delay(400)
+        }
+    }
     val background = Brush.linearGradient(listOf(theme.top, theme.bottom, theme.top))
     val glass = Color.White.copy(alpha = transparency / 100f * .17f)
     val edge = Color.White.copy(alpha = .24f)
 
     MaterialTheme(colorScheme = darkColorScheme()) {
         Box(Modifier.fillMaxSize().background(background)) {
-            Box(Modifier.size(260.dp).offset(x = 210.dp, y = 80.dp).background(theme.accent.copy(alpha = .10f), CircleShape))
-            Box(Modifier.size(220.dp).offset(x = (-100).dp, y = 390.dp).background(Color(0xFF64C9FF).copy(alpha = .08f), CircleShape))
+            Box(Modifier.size(300.dp).offset(x = 170.dp, y = 55.dp).background(Brush.radialGradient(listOf(theme.accent.copy(alpha = .22f), theme.accent.copy(alpha = .04f), Color.Transparent)), CircleShape))
+            Box(Modifier.size(270.dp).offset(x = (-125).dp, y = 380.dp).background(Brush.radialGradient(listOf(Color(0xFF64C9FF).copy(alpha = .18f), Color.Transparent)), CircleShape))
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.White.copy(alpha = .035f), Color.Transparent, Color.Black.copy(alpha = .12f)))))
             Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 20.dp)) {
                 Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 18.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
@@ -183,12 +195,25 @@ private fun AquaScreen(player: MediaController?) {
                             Text("NOW PLAYING", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
                         }
                         Spacer(Modifier.height(22.dp))
-                        AlbumCover(current?.artwork, 270, theme.accent, glass, edge, Modifier.align(Alignment.CenterHorizontally))
-                        Spacer(Modifier.height(24.dp))
-                        Text(current?.name ?: "Choose a song", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
-                        Text(if (current == null) "Your music library" else "Local audio", color = Color.White.copy(alpha = .60f), fontSize = 12.sp)
+                        AlbumCover(current?.artwork, 226, theme.accent, glass, edge, Modifier.align(Alignment.CenterHorizontally))
                         Spacer(Modifier.height(20.dp))
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text(current?.name ?: "Choose a song", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
+                        Text(if (current == null) "Your music library" else "LOCAL MUSIC", color = theme.accent.copy(alpha = .85f), fontSize = 10.sp, letterSpacing = 1.5.sp)
+                        Spacer(Modifier.height(14.dp))
+                        Slider(
+                            value = if (draggingSeek) playPosition else playPosition.coerceAtMost(durationMs.toFloat().coerceAtLeast(1f)),
+                            onValueChange = { draggingSeek = true; playPosition = it },
+                            onValueChangeFinished = { player?.seekTo(playPosition.toLong()); draggingSeek = false },
+                            valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
+                            enabled = durationMs > 0L,
+                            colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = theme.accent, inactiveTrackColor = Color.White.copy(alpha = .20f))
+                        )
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(formatTime(playPosition.toLong()), color = Color.White.copy(alpha = .65f), fontSize = 10.sp)
+                            Text(formatTime(durationMs), color = Color.White.copy(alpha = .65f), fontSize = 10.sp)
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                             GlassButton(Icons.Default.Shuffle, "Shuffle", theme.accent, glass, edge) { player?.shuffleModeEnabled = !(player?.shuffleModeEnabled ?: false) }
                             GlassButton(Icons.Default.SkipPrevious, "Previous", theme.accent, glass, edge) { player?.seekToPreviousMediaItem() }
                             Box(Modifier.size(72.dp).scale(pulse).background(Brush.linearGradient(listOf(Color.White, theme.accent)), CircleShape).border(1.dp, Color.White.copy(alpha = .8f), CircleShape).clickable {
@@ -203,8 +228,8 @@ private fun AquaScreen(player: MediaController?) {
                                 player?.repeatMode = if (player?.repeatMode == Player.REPEAT_MODE_ONE) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
                             }
                         }
-                        Spacer(Modifier.height(18.dp))
-                        Text("Select songs from your library on the Home screen", color = Color.White.copy(alpha = .55f), fontSize = 11.sp)
+                        Spacer(Modifier.height(12.dp))
+                        Text("PREVIOUS  •  PLAY  •  NEXT", color = Color.White.copy(alpha = .45f), fontSize = 9.sp, letterSpacing = 2.sp)
                     }
                     else -> {
                         GlassPanel(glass, edge) {
@@ -259,15 +284,6 @@ private fun AquaScreen(player: MediaController?) {
                     }
                 }
                 Spacer(Modifier.weight(1f, fill = false))
-                if (page != "settings") {
-                    Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalArrangement = Arrangement.Center) {
-                        NavigationPill("Library", page == "home", theme.accent) { page = "home" }
-                        Spacer(Modifier.width(10.dp))
-                        NavigationPill("Now Playing", page == "player", theme.accent) { page = "player" }
-                        Spacer(Modifier.width(10.dp))
-                        NavigationPill("Settings", false, theme.accent) { page = "settings" }
-                    }
-                }
             }
         }
     }
@@ -275,7 +291,7 @@ private fun AquaScreen(player: MediaController?) {
 
 @Composable
 private fun GlassPanel(fill: Color, edge: Color, content: @Composable ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxWidth().background(fill, RoundedCornerShape(28.dp)).border(1.dp, edge, RoundedCornerShape(28.dp)).padding(18.dp), content = content)
+    Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(Color.White.copy(alpha = .13f), fill, Color.White.copy(alpha = .045f))), RoundedCornerShape(30.dp)).border(1.dp, edge.copy(alpha = .85f), RoundedCornerShape(30.dp)).padding(18.dp), content = content)
 }
 @Composable
 private fun GlassButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, accent: Color, fill: Color, edge: Color, onClick: () -> Unit) {
@@ -299,8 +315,10 @@ private fun AlbumThumb(data: ByteArray?, accent: Color) {
         else Icon(Icons.Default.MusicNote, null, tint = accent)
     }
 }
-@Composable
-private fun NavigationPill(label: String, selected: Boolean, accent: Color, onClick: () -> Unit) {
-    Text(label, color = if (selected) Color(0xFF061A28) else Color.White.copy(alpha = .85f), fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-        modifier = Modifier.clip(CircleShape).background(if (selected) accent else Color.White.copy(alpha = .10f)).border(1.dp, Color.White.copy(alpha = .16f), CircleShape).clickable { onClick() }.padding(horizontal = 14.dp, vertical = 10.dp))
+
+private fun formatTime(milliseconds: Long): String {
+    val totalSeconds = (milliseconds / 1000L).coerceAtLeast(0L)
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    return "%d:%02d".format(minutes, seconds)
 }
