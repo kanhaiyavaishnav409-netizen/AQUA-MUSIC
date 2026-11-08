@@ -71,6 +71,9 @@ class MainActivity : ComponentActivity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001)
+        }
         setContent { AquaScreen(controller) }
     }
 }
@@ -106,7 +109,7 @@ private fun AquaScreen(player: MediaController?) {
         finally { runCatching { retriever.release() } }
     }
     fun mediaItem(track: AudioTrack): MediaItem {
-        val metadata = MediaMetadata.Builder().setTitle(track.name)
+        val metadata = MediaMetadata.Builder().setTitle(track.name).setArtist("AQUA MUSIC")
             .apply { track.artwork?.let { setArtworkData(it, MediaMetadata.PICTURE_TYPE_FRONT_COVER) } }.build()
         return MediaItem.Builder().setUri(track.uri).setMediaMetadata(metadata).build()
     }
