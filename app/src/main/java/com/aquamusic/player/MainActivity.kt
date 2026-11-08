@@ -1,13 +1,17 @@
 package com.aquamusic.player
 
 import android.content.ComponentName
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
+import android.graphics.BitmapFactory
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,40 +26,48 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 
+private data class AudioTrack(val uri: Uri, val name: String, val artwork: ByteArray?)
+private enum class AquaTheme(val label: String, val top: Color, val bottom: Color, val accent: Color) {
+    AQUA("Aqua Glass", Color(0xFF071C2B), Color(0xFF123D55), Color(0xFF83E9FF)),
+    CRYSTAL("Crystal", Color(0xFF182536), Color(0xFF35465D), Color(0xFFD6F5FF)),
+    MIDNIGHT("Midnight", Color(0xFF090B19), Color(0xFF252344), Color(0xFFB7A9FF)),
+    FROST("Frosted White", Color(0xFF243746), Color(0xFF607B8B), Color(0xFFEAFBFF)),
+    EMERALD("Emerald Glass", Color(0xFF061D1A), Color(0xFF145044), Color(0xFF91F5D0))
+}
+
 class MainActivity : ComponentActivity() {
     private var controller by mutableStateOf<MediaController?>(null)
     private var controllerFuture: ListenableFuture<MediaController>? = null
-
     override fun onStart() {
         super.onStart()
         val token = SessionToken(this, ComponentName(this, MusicService::class.java))
         val future = MediaController.Builder(this, token).buildAsync()
         controllerFuture = future
-        future.addListener({
-            runCatching { controller = future.get() }
-        }, MoreExecutors.directExecutor())
+        future.addListener({ runCatching { controller = future.get() } }, MoreExecutors.directExecutor())
     }
-
     override fun onStop() {
         controller = null
         controllerFuture?.let { MediaController.releaseFuture(it) }
         controllerFuture = null
         super.onStop()
     }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent { AquaScreen(controller) }
@@ -63,121 +75,232 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun AquaScreen(player: MediaController?) {
-    var tracks by remember { mutableStateOf(listOf<Uri>()) }
+private fun AquaScreen(player: MediaController?) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var tracks by remember { mutableStateOf(listOf<AudioTrack>()) }
     var selected by remember { mutableIntStateOf(0) }
     var playing by remember { mutableStateOf(false) }
+    var page by remember { mutableStateOf("home") }
+    var theme by remember { mutableStateOf(AquaTheme.AQUA) }
+    var transparency by remember { mutableFloatStateOf(78f) }
     var pressed by remember { mutableStateOf(false) }
-    val pulse by animateFloatAsState(if (pressed) .94f else 1f, label = "waterTap")
+    val pulse by animateFloatAsState(if (pressed) .93f else 1f, label = "glassTap")
+
+    fun displayName(uri: Uri): String {
+        var name = uri.lastPathSegment?.substringAfterLast('/') ?: "Audio track"
+        runCatching {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) name = c.getString(0) ?: name
+            }
+        }
+        return name.substringAfterLast(':').ifBlank { "Audio track" }
+    }
+    fun readArtwork(uri: Uri): ByteArray? {
+        val retriever = MediaMetadataRetriever()
+        return try { retriever.setDataSource(context, uri); retriever.embeddedPicture }
+        catch (_: Exception) { null }
+        finally { runCatching { retriever.release() } }
+    }
+    fun mediaItem(track: AudioTrack): MediaItem {
+        val metadata = MediaMetadata.Builder().setTitle(track.name)
+            .apply { track.artwork?.let { setArtworkData(it, MediaMetadata.PICTURE_TYPE_FRONT_COVER) } }.build()
+        return MediaItem.Builder().setUri(track.uri).setMediaMetadata(metadata).build()
+    }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { picked ->
         if (picked.isNotEmpty()) {
-            picked.forEach { uri ->
-                player?.addMediaItem(MediaItem.fromUri(uri))
+            val added = picked.map { uri ->
+                runCatching { context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                AudioTrack(uri, displayName(uri), readArtwork(uri))
             }
-            tracks = (tracks + picked).distinct()
-            if (player != null && player.mediaItemCount > 0) player.prepare()
+            tracks = (tracks + added).distinctBy { it.uri }
+            player?.let { p ->
+                val all = (tracks + added).distinctBy { it.uri }
+                p.setMediaItems(all.map { mediaItem(it) })
+                p.prepare()
+                if (all.isNotEmpty()) p.seekTo(all.size - added.size, 0)
+            }
+            selected = (tracks.size).coerceAtLeast(0)
+            page = "player"
         }
     }
-    val bg = Brush.linearGradient(listOf(Color(0xFF071521), Color(0xFF102D43), Color(0xFF07111E)))
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) { playing = isPlaying }
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                selected = player?.currentMediaItemIndex?.coerceAtLeast(0) ?: 0
+            }
+        }
+        player?.addListener(listener)
+        onDispose { player?.removeListener(listener) }
+    }
+
+    val current = tracks.getOrNull(selected)
+    val background = Brush.linearGradient(listOf(theme.top, theme.bottom, theme.top))
+    val glass = Color.White.copy(alpha = transparency / 100f * .17f)
+    val edge = Color.White.copy(alpha = .24f)
+
     MaterialTheme(colorScheme = darkColorScheme()) {
-        Box(Modifier.fillMaxSize().background(bg).padding(20.dp)) {
-            Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column {
-                        Text("AQUA", color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Black, letterSpacing = 3.sp)
-                        Text("MUSIC PLAYER", color = Color(0xFF79DDF5), fontSize = 10.sp, letterSpacing = 3.sp)
+        Box(Modifier.fillMaxSize().background(background)) {
+            Box(Modifier.size(260.dp).offset(x = 210.dp, y = 80.dp).background(theme.accent.copy(alpha = .10f), CircleShape))
+            Box(Modifier.size(220.dp).offset(x = (-100).dp, y = 390.dp).background(Color(0xFF64C9FF).copy(alpha = .08f), CircleShape))
+            Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 20.dp)) {
+                Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("AQUA MUSIC", color = Color.White, fontSize = 23.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 2.sp)
+                        Text("YOUR MUSIC • YOUR MOOD", color = theme.accent, fontSize = 9.sp, letterSpacing = 2.sp)
                     }
-                    GlassIcon(Icons.Default.FolderOpen, "Choose music") { picker.launch(arrayOf("audio/*")) }
+                    GlassButton(Icons.Default.Settings, "Settings", theme.accent, glass, edge) { page = "settings" }
                 }
-                Spacer(Modifier.height(28.dp))
-                Box(
-                    Modifier.size(250.dp).background(
-                        Brush.radialGradient(listOf(Color(0xFF3DD9F2).copy(alpha = .38f), Color(0xFF477BBD).copy(alpha = .13f), Color.Transparent)),
-                        CircleShape
-                    ).border(1.dp, Color.White.copy(alpha = .18f), CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Box(Modifier.size(205.dp).background(Brush.linearGradient(listOf(Color(0xFF6CEBFF).copy(alpha = .24f), Color(0xFF536B9C).copy(alpha = .18f))), RoundedCornerShape(38.dp)).border(1.dp, Color.White.copy(alpha = .24f), RoundedCornerShape(38.dp)), contentAlignment = Alignment.Center) {
-                        Icon(Icons.Default.GraphicEq, null, tint = Color(0xFF9CEFFF), modifier = Modifier.size(92.dp))
-                    }
-                }
-                Spacer(Modifier.height(24.dp))
-                Text(if (tracks.isEmpty()) "Your sound, your space" else "Track ${selected + 1} of ${tracks.size}", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.SemiBold)
-                Text(if (tracks.isEmpty()) "Choose songs from your device" else tracks.getOrNull(selected)?.lastPathSegment ?: "Selected audio", color = Color(0xFF9DB7C8), fontSize = 13.sp, maxLines = 1)
-                Spacer(Modifier.height(22.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                    GlassIcon(Icons.Default.Shuffle, "Shuffle") { player?.shuffleModeEnabled = !(player?.shuffleModeEnabled ?: false) }
-                    GlassIcon(Icons.Default.SkipPrevious, "Previous", 52) { player?.seekToPreviousMediaItem() }
-                    Box(Modifier.size(72.dp).scale(pulse).background(Brush.linearGradient(listOf(Color(0xFFB6F7FF), Color(0xFF43B9E5))), CircleShape).clickable {
-                        pressed = true
-                        if (player != null) {
-                            if (player.isPlaying) player.pause()
-                            else {
-                                if (player.mediaItemCount == 0 && tracks.isNotEmpty()) {
-                                    player.setMediaItems(tracks.map { MediaItem.fromUri(it) })
-                                    player.prepare()
-                                }
-                                player.play()
+                when (page) {
+                    "settings" -> {
+                        GlassPanel(glass, edge) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                GlassButton(Icons.Default.ArrowBack, "Back", theme.accent, glass, edge) { page = "home" }
+                                Spacer(Modifier.width(12.dp))
+                                Text("Settings", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                             }
-                            playing = player.isPlaying
-                        } else playing = !playing
-                        pressed = false
-                    }, contentAlignment = Alignment.Center) {
-                        Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = Color(0xFF082033), modifier = Modifier.size(40.dp))
-                    }
-                    GlassIcon(Icons.Default.SkipNext, "Next", 52) { player?.seekToNextMediaItem() }
-                    GlassIcon(Icons.Default.Repeat, "Repeat") {
-                        player?.repeatMode = if (player?.repeatMode == Player.REPEAT_MODE_ONE) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
-                    }
-                }
-                Spacer(Modifier.height(22.dp))
-                GlassPanel {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("YOUR LIBRARY", color = Color.White, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
-                        Text("${tracks.size} songs", color = Color(0xFF8EDFF3))
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    if (tracks.isEmpty()) Text("Tap the folder icon to add audio files.", color = Color(0xFF9DB7C8), fontSize = 13.sp)
-                    else LazyColumn(Modifier.heightIn(max = 170.dp)) {
-                        itemsIndexed(tracks) { index, uri ->
-                            Row(Modifier.fillMaxWidth().clickable {
-                                selected = index
-                                player?.let {
-                                    it.setMediaItem(MediaItem.fromUri(uri))
-                                    it.prepare()
-                                    it.play()
-                                    playing = true
+                            Spacer(Modifier.height(22.dp))
+                            Text("APPEARANCE", color = theme.accent, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+                            Spacer(Modifier.height(12.dp))
+                            AquaTheme.values().forEach { item ->
+                                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).clickable { theme = item }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Box(Modifier.size(34.dp).background(Brush.linearGradient(listOf(item.top, item.bottom)), CircleShape).border(1.dp, Color.White.copy(alpha = .5f), CircleShape))
+                                    Spacer(Modifier.width(12.dp))
+                                    Text(item.label, color = Color.White, modifier = Modifier.weight(1f))
+                                    if (theme == item) Icon(Icons.Default.CheckCircle, null, tint = item.accent)
                                 }
-                            }.padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.MusicNote, null, tint = Color(0xFF78DDF2))
+                            }
+                            Spacer(Modifier.height(18.dp))
+                            Text("GLASS TRANSPARENCY", color = theme.accent, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+                            Slider(value = transparency, onValueChange = { transparency = it }, valueRange = 25f..100f, colors = SliderDefaults.colors(thumbColor = theme.accent, activeTrackColor = theme.accent))
+                            Text("${transparency.toInt()}% transparency", color = Color.White.copy(alpha = .75f), fontSize = 12.sp)
+                        }
+                    }
+                    "player" -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            GlassButton(Icons.Default.ArrowBack, "Back", theme.accent, glass, edge) { page = "home" }
+                            Spacer(Modifier.width(12.dp))
+                            Text("NOW PLAYING", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+                        }
+                        Spacer(Modifier.height(22.dp))
+                        AlbumCover(current?.artwork, 270, theme.accent, glass, edge, Modifier.align(Alignment.CenterHorizontally))
+                        Spacer(Modifier.height(24.dp))
+                        Text(current?.name ?: "Choose a song", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
+                        Text(if (current == null) "Your music library" else "Local audio", color = Color.White.copy(alpha = .60f), fontSize = 12.sp)
+                        Spacer(Modifier.height(20.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            GlassButton(Icons.Default.Shuffle, "Shuffle", theme.accent, glass, edge) { player?.shuffleModeEnabled = !(player?.shuffleModeEnabled ?: false) }
+                            GlassButton(Icons.Default.SkipPrevious, "Previous", theme.accent, glass, edge) { player?.seekToPreviousMediaItem() }
+                            Box(Modifier.size(72.dp).scale(pulse).background(Brush.linearGradient(listOf(Color.White, theme.accent)), CircleShape).border(1.dp, Color.White.copy(alpha = .8f), CircleShape).clickable {
+                                pressed = true
+                                if (player?.isPlaying == true) player.pause() else player?.let { if (it.mediaItemCount == 0 && tracks.isNotEmpty()) { it.setMediaItems(tracks.map { t -> mediaItem(t) }); it.prepare() }; it.play() }
+                                pressed = false
+                            }, contentAlignment = Alignment.Center) {
+                                Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = theme.top, modifier = Modifier.size(38.dp))
+                            }
+                            GlassButton(Icons.Default.SkipNext, "Next", theme.accent, glass, edge) { player?.seekToNextMediaItem() }
+                            GlassButton(Icons.Default.Repeat, "Repeat", theme.accent, glass, edge) {
+                                player?.repeatMode = if (player?.repeatMode == Player.REPEAT_MODE_ONE) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
+                            }
+                        }
+                        Spacer(Modifier.height(18.dp))
+                        Text("Select songs from your library on the Home screen", color = Color.White.copy(alpha = .55f), fontSize = 11.sp)
+                    }
+                    else -> {
+                        GlassPanel(glass, edge) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                Column {
+                                    Text("YOUR LIBRARY", color = Color.White, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+                                    Text("${tracks.size} songs on this device", color = theme.accent, fontSize = 11.sp)
+                                }
+                                GlassButton(Icons.Default.Add, "Add songs", theme.accent, glass, edge) { picker.launch(arrayOf("audio/*")) }
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            if (tracks.isEmpty()) {
+                                Box(Modifier.fillMaxWidth().height(180.dp), contentAlignment = Alignment.Center) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Icon(Icons.Default.LibraryMusic, null, tint = theme.accent, modifier = Modifier.size(48.dp))
+                                        Spacer(Modifier.height(12.dp))
+                                        Text("Your music will appear here", color = Color.White, fontWeight = FontWeight.SemiBold)
+                                        Text("Tap + to choose audio files", color = Color.White.copy(alpha = .55f), fontSize = 12.sp)
+                                    }
+                                }
+                            } else {
+                                LazyColumn(Modifier.heightIn(max = 440.dp)) {
+                                    itemsIndexed(tracks) { index, track ->
+                                        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).clickable {
+                                            selected = index
+                                            player?.setMediaItems(tracks.map { t -> mediaItem(t) }, index, 0L)
+                                            player?.prepare()
+                                            player?.play()
+                                            page = "player"
+                                        }.padding(vertical = 8.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            AlbumThumb(track.artwork, theme.accent)
+                                            Spacer(Modifier.width(12.dp))
+                                            Text(track.name, color = Color.White, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 13.sp)
+                                            if (index == selected) Icon(Icons.Default.GraphicEq, null, tint = theme.accent)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        if (current != null) {
+                            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(glass).border(1.dp, edge, RoundedCornerShape(22.dp)).clickable { page = "player" }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                AlbumThumb(current.artwork, theme.accent)
                                 Spacer(Modifier.width(10.dp))
-                                Text(uri.lastPathSegment ?: "Audio file", color = Color.White, modifier = Modifier.weight(1f), maxLines = 1)
-                                if (index == selected) Icon(Icons.Default.GraphicEq, null, tint = Color(0xFF78DDF2))
+                                Text(current.name, color = Color.White, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp)
+                                IconButton(onClick = { if (player?.isPlaying == true) player.pause() else player?.play() }) {
+                                    Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = theme.accent)
+                                }
+                                IconButton(onClick = { player?.seekToNextMediaItem() }) { Icon(Icons.Default.SkipNext, null, tint = theme.accent) }
                             }
                         }
                     }
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedButton(onClick = { picker.launch(arrayOf("audio/*")) }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF9DEEFF))) {
-                        Icon(Icons.Default.Add, null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("ADD MUSIC FILES")
+                }
+                Spacer(Modifier.weight(1f, fill = false))
+                if (page != "settings") {
+                    Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalArrangement = Arrangement.Center) {
+                        NavigationPill("Library", page == "home", theme.accent) { page = "home" }
+                        Spacer(Modifier.width(10.dp))
+                        NavigationPill("Now Playing", page == "player", theme.accent) { page = "player" }
+                        Spacer(Modifier.width(10.dp))
+                        NavigationPill("Settings", false, theme.accent) { page = "settings" }
                     }
                 }
-                Spacer(Modifier.weight(1f))
-                Text("LIQUID GLASS • MADE FOR MUSIC", color = Color(0xFF62879B), fontSize = 10.sp, letterSpacing = 2.sp)
             }
         }
     }
 }
 
 @Composable
-fun GlassPanel(content: @Composable ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxWidth().background(Color.White.copy(alpha = .075f), RoundedCornerShape(26.dp)).border(1.dp, Color.White.copy(alpha = .15f), RoundedCornerShape(26.dp)).padding(18.dp), content = content)
+private fun GlassPanel(fill: Color, edge: Color, content: @Composable ColumnScope.() -> Unit) {
+    Column(Modifier.fillMaxWidth().background(fill, RoundedCornerShape(28.dp)).border(1.dp, edge, RoundedCornerShape(28.dp)).padding(18.dp), content = content)
 }
-
 @Composable
-fun GlassIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, size: Int = 44, onClick: () -> Unit) {
-    Box(Modifier.size(size.dp).background(Brush.linearGradient(listOf(Color.White.copy(alpha = .18f), Color.White.copy(alpha = .045f))), CircleShape).border(1.dp, Color.White.copy(alpha = .2f), CircleShape).clickable { onClick() }, contentAlignment = Alignment.Center) {
-        Icon(icon, contentDescription = label, tint = Color(0xFFBCEFFF), modifier = Modifier.size((size * .48f).dp))
+private fun GlassButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, accent: Color, fill: Color, edge: Color, onClick: () -> Unit) {
+    Box(Modifier.size(44.dp).background(Brush.linearGradient(listOf(fill, Color.White.copy(alpha = .035f))), CircleShape).border(1.dp, edge, CircleShape).clickable { onClick() }, contentAlignment = Alignment.Center) {
+        Icon(icon, contentDescription = label, tint = accent, modifier = Modifier.size(21.dp))
     }
+}
+@Composable
+private fun AlbumCover(data: ByteArray?, size: Int, accent: Color, fill: Color, edge: Color, modifier: Modifier = Modifier) {
+    val bitmap = remember(data) { data?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() } }
+    Box(modifier.size(size.dp).background(Brush.linearGradient(listOf(fill, Color.White.copy(alpha = .04f))), RoundedCornerShape(34.dp)).border(1.dp, edge, RoundedCornerShape(34.dp)).padding(10.dp), contentAlignment = Alignment.Center) {
+        if (bitmap != null) Image(bitmap, null, Modifier.fillMaxSize().clip(RoundedCornerShape(27.dp)))
+        else Icon(Icons.Default.Album, null, tint = accent, modifier = Modifier.size(100.dp))
+    }
+}
+@Composable
+private fun AlbumThumb(data: ByteArray?, accent: Color) {
+    val bitmap = remember(data) { data?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() } }
+    Box(Modifier.size(46.dp).background(Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp)).border(1.dp, Color.White.copy(alpha = .18f), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
+        if (bitmap != null) Image(bitmap, null, Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp)))
+        else Icon(Icons.Default.MusicNote, null, tint = accent)
+    }
+}
+@Composable
+private fun NavigationPill(label: String, selected: Boolean, accent: Color, onClick: () -> Unit) {
+    Text(label, color = if (selected) Color(0xFF061A28) else Color.White.copy(alpha = .85f), fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.clip(CircleShape).background(if (selected) accent else Color.White.copy(alpha = .10f)).border(1.dp, Color.White.copy(alpha = .16f), CircleShape).clickable { onClick() }.padding(horizontal = 14.dp, vertical = 10.dp))
 }
