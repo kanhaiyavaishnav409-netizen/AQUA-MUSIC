@@ -72,7 +72,6 @@ fun AquaScreen(player: MediaController?) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { picked ->
         if (picked.isNotEmpty()) {
             picked.forEach { uri ->
-                runCatching { androidx.compose.ui.platform.LocalContext.current }
                 player?.addMediaItem(MediaItem.fromUri(uri))
             }
             tracks = (tracks + picked).distinct()
