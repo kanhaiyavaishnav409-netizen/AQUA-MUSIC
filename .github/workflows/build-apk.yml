@@ -8,10 +8,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build APK with Gradle in Docker
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install required Android platform and build tools
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Build APK with Gradle and Android SDK
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE":/home/gradle/project \
+            -v "$ANDROID_HOME":/opt/android-sdk \
+            -e ANDROID_HOME=/opt/android-sdk \
+            -e ANDROID_SDK_ROOT=/opt/android-sdk \
             -w /home/gradle/project \
             gradle:8.11.1-jdk17 \
             gradle assembleDebug --no-daemon
