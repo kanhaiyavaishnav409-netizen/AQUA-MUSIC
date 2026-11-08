@@ -3,6 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [ main ]
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -11,26 +12,58 @@ jobs:
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle
+          key: aqua-gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            aqua-gradle-${{ runner.os }}-
+
       - name: Install Android SDK packages
         run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
-      - name: Build APK with Gradle and Android SDK
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          test -n "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Build APK with retry for temporary repository errors
         run: |
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE":/home/gradle/project \
-            -v "$ANDROID_HOME":/opt/android-sdk \
-            -e ANDROID_HOME=/opt/android-sdk \
-            -e ANDROID_SDK_ROOT=/opt/android-sdk \
-            -w /home/gradle/project \
-            gradle:8.11.1-jdk17 \
-            gradle assembleDebug --no-daemon
+          set +e
+          for attempt in 1 2 3 4; do
+            echo "AQUA MUSIC build attempt $attempt/4"
+            docker run --rm \
+              -v "$GITHUB_WORKSPACE":/home/gradle/project \
+              -v "$ANDROID_HOME":/opt/android-sdk \
+              -v "$HOME/.gradle":/home/gradle/.gradle \
+              -e ANDROID_HOME=/opt/android-sdk \
+              -e ANDROID_SDK_ROOT=/opt/android-sdk \
+              -w /home/gradle/project \
+              gradle:8.11.1-jdk17 \
+              gradle assembleDebug --no-daemon --stacktrace
+            result=$?
+            if [ "$result" -eq 0 ]; then
+              exit 0
+            fi
+            echo "Build attempt $attempt failed (exit $result); retrying after delay."
+            sleep $((attempt * 20))
+          done
+          exit 1
+
+      - name: Verify APK output
+        run: |
+          test -s app/build/outputs/apk/debug/app-debug.apk
+          ls -lh app/build/outputs/apk/debug/app-debug.apk
+
       - uses: actions/upload-artifact@v4
         with:
           name: aqua-music-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
